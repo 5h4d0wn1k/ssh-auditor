@@ -13,10 +13,29 @@ import socket
 from typing import List, Optional, Tuple
 
 
+async def _read_identification(reader: asyncio.StreamReader) -> bytes:
+    """Read the server's first line, bounded by the RFC 4253 identification
+    limit (255 bytes incl. CRLF). A fixed-size recv() is a truncation bug:
+    banners longer than one chunk, or split across TCP segments, must still
+    arrive whole. Bytes beyond the limit without a newline are reported with
+    an explicit (truncated) marker rather than silently cut."""
+    buf = b""
+    while b"\n" not in buf and len(buf) < 255:
+        chunk = await reader.read(64)
+        if not chunk:
+            break  # EOF: report whatever arrived
+        buf += chunk
+    if b"\n" in buf:
+        return buf.split(b"\n", 1)[0] + b"\n"
+    if len(buf) >= 255:
+        return buf[:255] + b"(truncated)"
+    return buf
+
+
 async def grab_banner(host: str, port: int, timeout: float) -> Optional[str]:
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-        data = await asyncio.wait_for(reader.read(128), timeout=1.0)
+        data = await asyncio.wait_for(_read_identification(reader), timeout=1.0)
         writer.close()
         try:
             await writer.wait_closed()
