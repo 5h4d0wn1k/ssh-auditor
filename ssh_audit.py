@@ -50,22 +50,28 @@ def load_creds(path: str) -> List[Tuple[str, str]]:
     return pairs
 
 
-async def try_ssh_password(host: str, port: int, user: str, password: str, timeout: float) -> bool:
+async def try_ssh_password(host: str, port: int, user: str, password: str, timeout: float) -> str:
     # To avoid heavyweight dependencies, we attempt a plain TCP and send "SSH-2.0" prelude then close.
     # Real auth attempts would require paramiko; here we only demonstrate reachability intent.
+    # The outcome is what was actually observed (#20): "attempted" when a TCP
+    # connection was made and the prelude sent (no real authentication is
+    # performed), "unreachable" when no connection was ever established.
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-        writer.write(b"SSH-2.0-lab-audit\r\n")
+    except (ConnectionRefusedError, socket.gaierror, asyncio.TimeoutError, OSError):
+        return "unreachable"
+    writer.write(b"SSH-2.0-lab-audit\r\n")
+    try:
         await writer.drain()
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        # We don't actually authenticate here (requires paramiko). Mark as attempted.
-        return False
     except Exception:
-        return False
+        pass
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+    # We don't actually authenticate here (requires paramiko). Mark as attempted.
+    return "attempted"
 
 
 async def main_async(args: argparse.Namespace) -> None:
@@ -78,11 +84,15 @@ async def main_async(args: argparse.Namespace) -> None:
         print("[-] No banner or unreachable.")
 
     if args.creds:
-        creds = load_creds(args.creds)
-        for user, password in creds:
-            ok = await try_ssh_password(args.host, args.port, user, password, args.timeout)
-            status = "attempted" if ok else "attempted (no auth performed)"
-            print(f"[*] {user}:{password} -> {status}")
+        if not banner:
+            # The banner grab already established the host is unreachable:
+            # no credential was tried, so report that, not "attempted" (#20).
+            print(f"[*] credential stage skipped: {args.host}:{args.port} unreachable")
+        else:
+            creds = load_creds(args.creds)
+            for user, password in creds:
+                status = await try_ssh_password(args.host, args.port, user, password, args.timeout)
+                print(f"[*] {user}:{password} -> {status}")
 
 
 def main() -> None:
